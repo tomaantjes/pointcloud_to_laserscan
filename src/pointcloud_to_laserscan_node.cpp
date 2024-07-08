@@ -74,14 +74,16 @@ PointCloudToLaserScanNode::PointCloudToLaserScanNode(const rclcpp::NodeOptions &
   range_max_ = this->declare_parameter("range_max", std::numeric_limits<double>::max());
   inf_epsilon_ = this->declare_parameter("inf_epsilon", 1.0);
   use_inf_ = this->declare_parameter("use_inf", true);
-  std::string pose_topic_ = this->declare_parameter("pose_topic", "/mavros/local_position/pose");
+  std::string pose_topic_ = this->declare_parameter("pose_topic", "/visual_slam/tracking/vo_pose");
 
   rclcpp::QoS qos_R(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_default));
   qos_R.reliable();
   pub_ = this->create_publisher<sensor_msgs::msg::LaserScan>("scan", qos_R);
 
+  rclcpp::QoS qos_best_effort(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_default));
+  qos_best_effort.best_effort();
   pose_subscriber_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-    pose_topic_, 10, std::bind(&PointCloudToLaserScanNode::poseCallback, this, std::placeholders::_1));
+    pose_topic_, qos_best_effort, std::bind(&PointCloudToLaserScanNode::poseCallback, this, std::placeholders::_1));
   
   using std::placeholders::_1;
   // if pointcloud target frame specified, we need to filter by transform availability
@@ -150,6 +152,8 @@ void PointCloudToLaserScanNode::poseCallback(const geometry_msgs::msg::PoseStamp
     pose_msg->pose.orientation.w);
   tf2::Matrix3x3 m(q);
   m.getRPY(latest_roll_, latest_pitch_, latest_yaw_);
+  // RCLCPP_INFO(this->get_logger(), "ROLL: %f PITCH: %f", latest_roll_, latest_pitch_);
+  // std::cout << latest_roll_ << "ROLL " << latest_pitch_ << "PITCH";
 }
 
 void PointCloudToLaserScanNode::cloudCallback(
@@ -198,6 +202,7 @@ void PointCloudToLaserScanNode::cloudCallback(
   tf2::Matrix3x3 mat(q);
 
   tf2::Vector3 rotated_point;
+  int n = 0;
   // Iterate through pointcloud
   for (sensor_msgs::PointCloud2ConstIterator<float> iter_x(*cloud_msg, "x"),
     iter_y(*cloud_msg, "y"), iter_z(*cloud_msg, "z");
@@ -205,13 +210,15 @@ void PointCloudToLaserScanNode::cloudCallback(
   {
     rotated_point.setX(*iter_x);
     rotated_point.setY(*iter_y);
-    rotated_point.setX(*iter_z);
+    rotated_point.setZ(*iter_z);
     rotated_point = mat * rotated_point;
+    
+    
   // Check if the transformed point is level with the ground 
-    if (fabs(rotated_point.z()) > 0.05) { 
+    if (fabs(rotated_point.getZ()) > 0.05) { 
       continue;
     }
-  
+    // RCLCPP_INFO(this->get_logger(), "z_before: %f z_after: %f", *iter_z, rotated_point.getZ());
     if (std::isnan(*iter_x) || std::isnan(*iter_y) || std::isnan(*iter_z)) {
       RCLCPP_DEBUG(
         this->get_logger(),
@@ -219,8 +226,13 @@ void PointCloudToLaserScanNode::cloudCallback(
         *iter_x, *iter_y, *iter_z);
       continue;
     }
+    n++;
+    if (n%300 == 0) {
+      // RCLCPP_INFO(this->get_logger(), "Old point: %f, %f, %f, New point: %f, %f, %f, RPY: %f, %f", *iter_x, *iter_y, *iter_z, rotated_point.getX(), rotated_point.getY(), rotated_point.getZ(), latest_roll_ * 180 / M_PI, latest_pitch_ * 180 / M_PI);
 
-    if (*iter_z > max_height_ || *iter_z < min_height_) {
+    }
+
+    if (rotated_point.getZ() > max_height_ || rotated_point.getZ() < min_height_) {
       RCLCPP_DEBUG(
         this->get_logger(),
         "rejected for height %f not in range (%f, %f)\n",
@@ -229,6 +241,7 @@ void PointCloudToLaserScanNode::cloudCallback(
     }
 
     double range = hypot(*iter_x, *iter_y);
+    range = hypot(rotated_point.getX(), rotated_point.getY());
     if (range < range_min_) {
       RCLCPP_DEBUG(
         this->get_logger(),
@@ -245,6 +258,7 @@ void PointCloudToLaserScanNode::cloudCallback(
     }
 
     double angle = atan2(*iter_y, *iter_x);
+    angle = atan2(rotated_point.getY(), rotated_point.getX());
     if (angle < scan_msg->angle_min || angle > scan_msg->angle_max) {
       RCLCPP_DEBUG(
         this->get_logger(),
