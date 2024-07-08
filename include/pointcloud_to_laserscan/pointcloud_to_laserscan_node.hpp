@@ -55,6 +55,8 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 
+#include "geometry_msgs/msg/pose_stamped.hpp"
+
 #include "pointcloud_to_laserscan/visibility_control.h"
 
 namespace pointcloud_to_laserscan
@@ -75,7 +77,7 @@ public:
 
 private:
   void cloudCallback(sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud_msg);
-
+  void poseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr pose_msg);
   void subscriptionListenerThreadLoop();
 
   std::unique_ptr<tf2_ros::Buffer> tf2_;
@@ -83,6 +85,7 @@ private:
   message_filters::Subscriber<sensor_msgs::msg::PointCloud2> sub_;
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::LaserScan>> pub_;
   std::unique_ptr<MessageFilter> message_filter_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_subscriber_;
 
   std::thread subscription_listener_thread_;
   std::atomic_bool alive_{true};
@@ -92,7 +95,7 @@ private:
   std::string target_frame_;
   double tolerance_;
   double min_height_, max_height_, angle_min_, angle_max_, angle_increment_, scan_time_, range_min_,
-    range_max_;
+    range_max_, latest_pitch_, latest_roll_, latest_yaw_;
   bool use_inf_;
   double inf_epsilon_;
 };

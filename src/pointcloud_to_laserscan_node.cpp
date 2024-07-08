@@ -74,11 +74,15 @@ PointCloudToLaserScanNode::PointCloudToLaserScanNode(const rclcpp::NodeOptions &
   range_max_ = this->declare_parameter("range_max", std::numeric_limits<double>::max());
   inf_epsilon_ = this->declare_parameter("inf_epsilon", 1.0);
   use_inf_ = this->declare_parameter("use_inf", true);
+  std::string pose_topic_ = this->declare_parameter("pose_topic", "/mavros/local_position/pose");
 
   rclcpp::QoS qos_R(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_default));
   qos_R.reliable();
   pub_ = this->create_publisher<sensor_msgs::msg::LaserScan>("scan", qos_R);
 
+  pose_subscriber_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+    pose_topic_, 10, std::bind(&PointCloudToLaserScanNode::poseCallback, this, std::placeholders::_1));
+  
   using std::placeholders::_1;
   // if pointcloud target frame specified, we need to filter by transform availability
   if (!target_frame_.empty()) {
@@ -136,6 +140,18 @@ void PointCloudToLaserScanNode::subscriptionListenerThreadLoop()
   sub_.unsubscribe();
 }
 
+
+void PointCloudToLaserScanNode::poseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr pose_msg)
+{
+  tf2::Quaternion q(
+    pose_msg->pose.orientation.x,
+    pose_msg->pose.orientation.y,
+    pose_msg->pose.orientation.z,
+    pose_msg->pose.orientation.w);
+  tf2::Matrix3x3 m(q);
+  m.getRPY(latest_roll_, latest_pitch_, latest_yaw_);
+}
+
 void PointCloudToLaserScanNode::cloudCallback(
   sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud_msg)
 {
@@ -176,12 +192,26 @@ void PointCloudToLaserScanNode::cloudCallback(
       return;
     }
   }
+  // Create a transformation matrix from the roll and pitch
+  tf2::Quaternion q;
+  q.setRPY(latest_roll_, latest_pitch_, 0.0);  // Only roll and pitch, no yaw
+  tf2::Matrix3x3 mat(q);
 
+  tf2::Vector3 rotated_point;
   // Iterate through pointcloud
   for (sensor_msgs::PointCloud2ConstIterator<float> iter_x(*cloud_msg, "x"),
     iter_y(*cloud_msg, "y"), iter_z(*cloud_msg, "z");
     iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z)
   {
+    rotated_point.setX(*iter_x);
+    rotated_point.setY(*iter_y);
+    rotated_point.setX(*iter_z);
+    rotated_point = mat * rotated_point;
+  // Check if the transformed point is level with the ground 
+    if (fabs(rotated_point.z()) > 0.05) { 
+      continue;
+    }
+  
     if (std::isnan(*iter_x) || std::isnan(*iter_y) || std::isnan(*iter_z)) {
       RCLCPP_DEBUG(
         this->get_logger(),
