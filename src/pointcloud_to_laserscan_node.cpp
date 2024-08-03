@@ -59,7 +59,8 @@ PointCloudToLaserScanNode::PointCloudToLaserScanNode(const rclcpp::NodeOptions &
 : rclcpp::Node("pointcloud_to_laserscan", options)
 {
   target_frame_ = this->declare_parameter("target_frame", "");
-  tolerance_ = this->declare_parameter("transform_tolerance", 0.01);
+  tolerance_ = this->declare_parameter("transform_tolerance", 0.5);
+  lidar_frame_level_ = this->declare_parameter("lidar_frame_level", "lidar_frame_level");
   // TODO(hidmic): adjust default input queue size based on actual concurrency levels
   // achievable by the associated executor
   input_queue_size_ = this->declare_parameter(
@@ -74,8 +75,8 @@ PointCloudToLaserScanNode::PointCloudToLaserScanNode(const rclcpp::NodeOptions &
   range_max_ = this->declare_parameter("range_max", std::numeric_limits<double>::max());
   inf_epsilon_ = this->declare_parameter("inf_epsilon", 1.0);
   use_inf_ = this->declare_parameter("use_inf", true);
-  std::string pose_topic_ = this->declare_parameter("pose_topic", "/visual_slam/tracking/vo_pose");
-
+  // std::string pose_topic_ = this->declare_parameter("pose_topic", "/visual_slam/tracking/vo_pose");
+  std::string pose_topic_ = this->declare_parameter("pose_topic", "/mavros/local_position/pose");
   rclcpp::QoS qos_R(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_default));
   qos_R.reliable();
   pub_ = this->create_publisher<sensor_msgs::msg::LaserScan>("scan", qos_R);
@@ -163,7 +164,8 @@ void PointCloudToLaserScanNode::cloudCallback(
   auto scan_msg = std::make_unique<sensor_msgs::msg::LaserScan>();
   scan_msg->header = cloud_msg->header;
   if (!target_frame_.empty()) {
-    scan_msg->header.frame_id = target_frame_;
+    // scan_msg->header.frame_id = target_frame_;
+    scan_msg->header.frame_id = lidar_frame_level_;
   }
 
   scan_msg->angle_min = angle_min_;
@@ -186,38 +188,53 @@ void PointCloudToLaserScanNode::cloudCallback(
   }
 
   // Transform cloud if necessary
-  if (scan_msg->header.frame_id != cloud_msg->header.frame_id) {
-    try {
+  // if (scan_msg->header.frame_id != cloud_msg->header.frame_id) {
+  //   RCLCPP_INFO(this->get_logger(), "Transforming point cloud from frame %s to frame %s",
+  //     cloud_msg->header.frame_id.c_str(), scan_msg->header.frame_id.c_str());
+  //   try {
+  //     auto cloud = std::make_shared<sensor_msgs::msg::PointCloud2>();
+  //     tf2_->transform(*cloud_msg, *cloud, target_frame_, tf2::durationFromSec(tolerance_));
+  //     cloud_msg = cloud;
+  //   } catch (tf2::TransformException & ex) {
+  //     RCLCPP_ERROR_STREAM(this->get_logger(), "Transform failure: " << ex.what());
+  //     return;
+  //   }
+  // }
+  try {
       auto cloud = std::make_shared<sensor_msgs::msg::PointCloud2>();
-      tf2_->transform(*cloud_msg, *cloud, target_frame_, tf2::durationFromSec(tolerance_));
+      tf2_->transform(*cloud_msg, *cloud, lidar_frame_level_, tf2::durationFromSec(tolerance_));
       cloud_msg = cloud;
     } catch (tf2::TransformException & ex) {
       RCLCPP_ERROR_STREAM(this->get_logger(), "Transform failure: " << ex.what());
       return;
     }
-  }
+
   // Create a transformation matrix from the roll and pitch
   tf2::Quaternion q;
   q.setRPY(latest_roll_, latest_pitch_, 0.0);  // Only roll and pitch, no yaw
   tf2::Matrix3x3 mat(q);
 
   tf2::Vector3 rotated_point;
+  
+  int n_inf = 0;
   int n = 0;
   // Iterate through pointcloud
   for (sensor_msgs::PointCloud2ConstIterator<float> iter_x(*cloud_msg, "x"),
     iter_y(*cloud_msg, "y"), iter_z(*cloud_msg, "z");
     iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z)
   {
-    rotated_point.setX(*iter_x);
-    rotated_point.setY(*iter_y);
-    rotated_point.setZ(*iter_z);
-    rotated_point = mat * rotated_point;
     
-    
-  // Check if the transformed point is level with the ground 
-    if (fabs(rotated_point.getZ()) > 0.05) { 
+    n++;
+    // Check if iter_x, iter_y, iter_z are infinite and if so set to range_max
+    if (std::isinf(*iter_x) || std::isinf(*iter_y) || std::isinf(*iter_z)) {
+      RCLCPP_DEBUG(
+        this->get_logger(),
+        "rejected for infinite in point(%f, %f, %f)\n",
+        *iter_x, *iter_y, *iter_z);
+      n_inf++;
       continue;
     }
+  
     // RCLCPP_INFO(this->get_logger(), "z_before: %f z_after: %f", *iter_z, rotated_point.getZ());
     if (std::isnan(*iter_x) || std::isnan(*iter_y) || std::isnan(*iter_z)) {
       RCLCPP_DEBUG(
@@ -225,14 +242,9 @@ void PointCloudToLaserScanNode::cloudCallback(
         "rejected for nan in point(%f, %f, %f)\n",
         *iter_x, *iter_y, *iter_z);
       continue;
-    }
-    n++;
-    if (n%300 == 0) {
-      // RCLCPP_INFO(this->get_logger(), "Old point: %f, %f, %f, New point: %f, %f, %f, RPY: %f, %f", *iter_x, *iter_y, *iter_z, rotated_point.getX(), rotated_point.getY(), rotated_point.getZ(), latest_roll_ * 180 / M_PI, latest_pitch_ * 180 / M_PI);
-
-    }
-
-    if (rotated_point.getZ() > max_height_ || rotated_point.getZ() < min_height_) {
+    }    
+    
+    if (*iter_z > max_height_ || *iter_z < min_height_) {
       RCLCPP_DEBUG(
         this->get_logger(),
         "rejected for height %f not in range (%f, %f)\n",
@@ -241,7 +253,6 @@ void PointCloudToLaserScanNode::cloudCallback(
     }
 
     double range = hypot(*iter_x, *iter_y);
-    range = hypot(rotated_point.getX(), rotated_point.getY());
     if (range < range_min_) {
       RCLCPP_DEBUG(
         this->get_logger(),
@@ -257,8 +268,11 @@ void PointCloudToLaserScanNode::cloudCallback(
       continue;
     }
 
+    if (fabs(*iter_z) > 0.3 * std::min(range / 6, 0.33)) { 
+      continue;
+    }
+
     double angle = atan2(*iter_y, *iter_x);
-    angle = atan2(rotated_point.getY(), rotated_point.getX());
     if (angle < scan_msg->angle_min || angle > scan_msg->angle_max) {
       RCLCPP_DEBUG(
         this->get_logger(),
@@ -266,13 +280,15 @@ void PointCloudToLaserScanNode::cloudCallback(
         angle, scan_msg->angle_min, scan_msg->angle_max);
       continue;
     }
-
+    
     // overwrite range at laserscan ray if new range is smaller
+    // RCLCPP_INFO(this->get_logger(), "ANGLE: %f x: %f y: %f z: %f x_orig: %f, y_orig: %f, z_orig: %f" , angle * 180 / M_PI, rotated_point.getX(), rotated_point.getY(), rotated_point.getZ(), *iter_x, *iter_y, *iter_z);
     int index = (angle - scan_msg->angle_min) / scan_msg->angle_increment;
     if (range < scan_msg->ranges[index]) {
       scan_msg->ranges[index] = range;
     }
   }
+  // RCLCPP_INFO(this->get_logger(), "Number of points: %d, Number of inf: %d", n, n_inf);
   pub_->publish(std::move(scan_msg));
 }
 

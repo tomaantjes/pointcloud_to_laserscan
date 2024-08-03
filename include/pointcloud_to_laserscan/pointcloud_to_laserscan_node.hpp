@@ -92,12 +92,16 @@ private:
 
   // ROS Parameters
   int input_queue_size_;
-  std::string target_frame_;
+  std::string target_frame_, pose_topic_, lidar_frame_level_;
+
   double tolerance_;
   double min_height_, max_height_, angle_min_, angle_max_, angle_increment_, scan_time_, range_min_,
-    range_max_, latest_pitch_, latest_roll_, latest_yaw_;
+    range_max_;
   bool use_inf_;
   double inf_epsilon_;
+  double latest_roll_ = 0.0;
+  double latest_pitch_ = 0.0;
+  double latest_yaw_ = 0.0;
 };
 
 }  // namespace pointcloud_to_laserscan
